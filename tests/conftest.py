@@ -12,3 +12,9 @@ def no_network(monkeypatch):
 
     monkeypatch.setattr(socket.socket, "connect", boom)
     monkeypatch.setattr(socket, "getaddrinfo", boom)
+
+
+@pytest.fixture(autouse=True)
+def isolated_cache(monkeypatch, tmp_path):
+    """Cache VirusTotal selalu di folder sementara, bukan ~/.cache asli."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))

@@ -1,6 +1,9 @@
 import argparse
 import base64
+import contextlib
+import hashlib
 import json
+import math
 import os
 import socket
 import ssl
@@ -9,6 +12,7 @@ import time
 from datetime import UTC, datetime
 from difflib import SequenceMatcher
 from importlib import metadata
+from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
@@ -19,6 +23,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 VT_BASE = "https://www.virustotal.com/api/v3"
+RATE_LIMIT_WAIT_DEFAULT = 15.0  # detik, kalau Retry-After tidak ada atau tidak terbaca
+RATE_LIMIT_WAIT_MAX = 30.0  # detik, batas atas menunggu setelah 429
+VT_CACHE_TTL = 6 * 3600  # detik. Pendek, karena situs bisa berubah jadi berbahaya
+VT_CACHE_MAX = 500  # jumlah entri maksimal di cache
 
 # merek -> domain resmi miliknya
 BRANDS = {
@@ -154,28 +162,115 @@ def vt_stats(stats: dict) -> dict:
     }
 
 
-def check_virustotal(url: str) -> dict:
-    key = os.getenv("VT_API_KEY")
-    if not key:
-        return {"ok": False, "error": "VT_API_KEY belum diatur di .env"}
+class VTRateLimited(Exception):
+    """VirusTotal menjawab 429 lagi setelah satu kali mencoba ulang."""
 
+
+def _now() -> float:
+    return time.time()
+
+
+def _cache_path() -> Path:
+    base = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+    return Path(base) / "url-checker" / "virustotal.json"
+
+
+def _cache_key(url: str) -> str:
+    # hash, supaya URL yang diperiksa tidak tersimpan sebagai teks di disk
+    return hashlib.sha256(url.encode()).hexdigest()
+
+
+def _is_number(x: object) -> bool:
+    return type(x) in (int, float)
+
+
+def _cache_load() -> dict:
+    try:
+        data = json.loads(_cache_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _cache_get(url: str) -> dict | None:
+    entry = _cache_load().get(_cache_key(url))
+    if not isinstance(entry, dict):
+        return None
+    saved, stats = entry.get("time"), entry.get("stats")
+    if not _is_number(saved) or not isinstance(stats, dict):
+        return None
+    if not all(type(v) is int for v in stats.values()):
+        return None
+    age = _now() - saved
+    if not 0 <= age <= VT_CACHE_TTL:
+        return None
+    result = vt_stats(stats)
+    result["cached"] = True
+    result["age_minutes"] = int(age // 60)
+    return result
+
+
+def _cache_put(url: str, stats: dict) -> None:
+    now = _now()
+    data = {
+        k: v
+        for k, v in _cache_load().items()
+        if isinstance(v, dict)
+        and _is_number(v.get("time"))
+        and 0 <= now - v["time"] <= VT_CACHE_TTL
+    }
+    data[_cache_key(url)] = {"time": now, "stats": stats}
+    excess = max(0, len(data) - VT_CACHE_MAX)
+    for name in sorted(data, key=lambda n: data[n]["time"])[:excess]:
+        del data[name]
+    path = _cache_path()
+    # cache gagal ditulis bukan alasan menggagalkan analisis
+    with contextlib.suppress(OSError):
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        tmp = path.with_suffix(".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        os.replace(tmp, path)
+
+
+def _retry_wait(r: requests.Response) -> float:
+    try:
+        wait = float(r.headers.get("Retry-After", ""))
+    except ValueError:  # kosong, atau format tanggal HTTP
+        return RATE_LIMIT_WAIT_DEFAULT
+    if math.isnan(wait):
+        return RATE_LIMIT_WAIT_DEFAULT
+    return min(max(wait, 1.0), RATE_LIMIT_WAIT_MAX)
+
+
+def _vt_send(method: str, url: str, **kwargs) -> requests.Response:
+    """Kirim request ke VirusTotal. Kena 429: tunggu sekali lalu coba lagi."""
+    for attempt in (1, 2):
+        r = requests.request(method, url, timeout=15, **kwargs)
+        if r.status_code != 429:
+            return r
+        if attempt == 1:
+            time.sleep(_retry_wait(r))
+    raise VTRateLimited
+
+
+def _query_virustotal(url: str, key: str) -> dict:
     headers = {"x-apikey": key}
     url_id = base64.urlsafe_b64encode(url.encode()).decode().strip("=")
 
     try:
-        r = requests.get(f"{VT_BASE}/urls/{url_id}", headers=headers, timeout=15)
+        r = _vt_send("GET", f"{VT_BASE}/urls/{url_id}", headers=headers)
 
         if r.status_code == 404:
             # belum pernah discan: kirim, lalu tunggu hasilnya
-            r = requests.post(
-                f"{VT_BASE}/urls", headers=headers, data={"url": url}, timeout=15
-            )
+            r = _vt_send("POST", f"{VT_BASE}/urls", headers=headers, data={"url": url})
             r.raise_for_status()
             analysis_id = r.json()["data"]["id"]
             for _ in range(4):
                 time.sleep(5)  # jeda, juga menjaga batas 4 request/menit
-                a = requests.get(
-                    f"{VT_BASE}/analyses/{analysis_id}", headers=headers, timeout=15
+                a = _vt_send(
+                    "GET", f"{VT_BASE}/analyses/{analysis_id}", headers=headers
                 )
                 a.raise_for_status()
                 attrs = a.json()["data"]["attributes"]
@@ -185,8 +280,31 @@ def check_virustotal(url: str) -> dict:
 
         r.raise_for_status()
         return vt_stats(r.json()["data"]["attributes"]["last_analysis_stats"])
+    except VTRateLimited:
+        return {
+            "ok": False,
+            "error": "VirusTotal kena batas (429), coba lagi nanti",
+            "rate_limited": True,
+        }
     except requests.RequestException as e:
         return {"ok": False, "error": short_error(e)}
+    except (KeyError, TypeError, ValueError):
+        return {"ok": False, "error": "respons VirusTotal tidak terduga"}
+
+
+def check_virustotal(url: str) -> dict:
+    key = os.getenv("VT_API_KEY")
+    if not key:
+        return {"ok": False, "error": "VT_API_KEY belum diatur di .env"}
+
+    cached = _cache_get(url)
+    if cached:
+        return cached
+
+    result = _query_virustotal(url, key)
+    if result.get("ok"):  # hanya hasil sukses yang disimpan
+        _cache_put(url, {k: v for k, v in result.items() if k != "ok"})
+    return result
 
 
 def score(
