@@ -1,5 +1,5 @@
 [project]
-name = "url-cheker"
+name = "url-checker"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.scripts]
-url-cheker = "url_cheker:main"
+url-checker = "url_checker:main"
 
 [build-system]
 requires = ["uv_build>=0.13.7,<0.14.0"]

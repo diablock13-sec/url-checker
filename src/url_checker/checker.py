@@ -241,7 +241,7 @@ def print_section(data: dict) -> None:
 
 def main() -> None:
     if len(sys.argv) != 2:
-        print("Pemakaian: uv run checker.py <url>")
+        print("Pemakaian: url-checker <url>")
         sys.exit(1)
 
     raw_url = sys.argv[1]
