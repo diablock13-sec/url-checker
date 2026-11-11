@@ -197,3 +197,27 @@ def test_main_missing_config_exits_64(monkeypatch, tmp_path, capsys):
     missing = tmp_path / "nope.toml"
     assert checker.main(["--config", str(missing), "example.com"]) == checker.EXIT_USAGE
     assert "tidak bisa membaca" in capsys.readouterr().err
+
+
+# ---- catatan "sangat baru" mengikuti domain_new_days ----
+
+
+def test_new_domain_note_follows_config(monkeypatch, tmp_path):
+    stub_checks(monkeypatch)
+    age_60 = {**OK_AGE, "age_days": 60}
+    monkeypatch.setattr(checker, "check_domain_age", lambda host: age_60)
+    cfg = load_config(tweak(tmp_path, "domain_new_days = 30", "domain_new_days = 90"))
+
+    result = checker.analyze("example.com", cfg)
+
+    assert "sangat baru" in result["domain_age"]["note"]
+
+
+def test_new_domain_note_absent_above_default_limit(monkeypatch):
+    stub_checks(monkeypatch)
+    age_60 = {**OK_AGE, "age_days": 60}
+    monkeypatch.setattr(checker, "check_domain_age", lambda host: age_60)
+
+    result = checker.analyze("example.com")
+
+    assert "note" not in result["domain_age"]

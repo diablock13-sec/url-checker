@@ -105,8 +105,6 @@ def check_domain_age(host: str) -> dict:
         "created": created.date().isoformat(),
         "age_days": age_days,
     }
-    if age_days < 30:
-        result["note"] = "domain sangat baru, lebih mencurigakan"
     return result
 
 
@@ -386,6 +384,9 @@ def analyze(raw_url: str, config: Config | None = None) -> dict:
 
     ssl_info = check_ssl(url_info["host"], url_info["port"] or 443)
     age_info = check_domain_age(url_info["host"])
+    new_days = (config or default_config()).limits["domain_new_days"]
+    if age_info.get("ok") and age_info["age_days"] < new_days:
+        age_info = {**age_info, "note": "domain sangat baru, lebih mencurigakan"}
     flags = check_suspicious(raw_url, url_info["host"], config)
     vt_info = check_virustotal(full_url)
     verdict, points, reasons = score(ssl_info, age_info, flags, vt_info, config)
