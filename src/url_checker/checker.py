@@ -20,6 +20,8 @@ import tldextract
 import whois
 from dotenv import load_dotenv
 
+from url_checker.config import Config, ConfigError, default_config, load_config
+
 load_dotenv()
 
 VT_BASE = "https://www.virustotal.com/api/v3"
@@ -27,18 +29,6 @@ RATE_LIMIT_WAIT_DEFAULT = 15.0  # detik, kalau Retry-After tidak ada atau tidak 
 RATE_LIMIT_WAIT_MAX = 30.0  # detik, batas atas menunggu setelah 429
 VT_CACHE_TTL = 6 * 3600  # detik. Pendek, karena situs bisa berubah jadi berbahaya
 VT_CACHE_MAX = 500  # jumlah entri maksimal di cache
-
-# merek -> domain resmi miliknya
-BRANDS = {
-    "paypal": {"paypal.com"},
-    "google": {"google.com", "google.co.id"},
-    "facebook": {"facebook.com"},
-    "microsoft": {"microsoft.com"},
-    "apple": {"apple.com"},
-    "amazon": {"amazon.com"},
-    "tokopedia": {"tokopedia.com"},
-    "shopee": {"shopee.co.id", "shopee.com"},
-}
 
 # angka yang sering dipakai menyamar jadi huruf
 LOOKALIKE = str.maketrans({"0": "o", "1": "l", "3": "e", "4": "a", "5": "s"})
@@ -120,7 +110,11 @@ def check_domain_age(host: str) -> dict:
     return result
 
 
-def check_suspicious(raw_url: str, host: str) -> list[str]:
+def check_suspicious(
+    raw_url: str, host: str, config: Config | None = None
+) -> list[str]:
+    cfg = config or default_config()
+    limits = cfg.limits
     flags = []
 
     # 1. '@' dicek di teks asli, karena urlparse membuangnya dari host
@@ -131,22 +125,22 @@ def check_suspicious(raw_url: str, host: str) -> list[str]:
 
     # 2. terlalu banyak subdomain
     subs = [s for s in ext.subdomain.split(".") if s]
-    if len(subs) >= 3:
+    if len(subs) >= limits["many_subdomains"]:
         flags.append(f"subdomain terlalu banyak ({len(subs)})")
 
     # 3. tanda '-' berlebihan
-    if host.count("-") >= 3:
+    if host.count("-") >= limits["many_hyphens"]:
         flags.append(f"tanda '-' berlebihan ({host.count('-')})")
 
     # 4. mirip atau memuat nama merek
     registered = f"{ext.domain}.{ext.suffix}"
     label = ext.domain.translate(LOOKALIKE)
-    for brand, real_domains in BRANDS.items():
+    for brand, real_domains in cfg.brands.items():
         if registered in real_domains:
             continue
         if brand in label:
             flags.append(f"memuat nama merek '{brand}' tapi bukan domain resminya")
-        elif SequenceMatcher(None, label, brand).ratio() >= 0.85:
+        elif SequenceMatcher(None, label, brand).ratio() >= limits["brand_similarity"]:
             flags.append(f"mirip nama merek '{brand}'")
 
     return flags
@@ -308,49 +302,63 @@ def check_virustotal(url: str) -> dict:
 
 
 def score(
-    ssl_info: dict, age_info: dict, flags: list[str], vt_info: dict
+    ssl_info: dict,
+    age_info: dict,
+    flags: list[str],
+    vt_info: dict,
+    config: Config | None = None,
 ) -> tuple[str, int, list[str]]:
+    cfg = config or default_config()
+    w, lim = cfg.weights, cfg.limits
     points = 0
     reasons = []
 
     if vt_info.get("ok"):
         mal = vt_info["malicious"]
         sus = vt_info["suspicious"]
-        if mal >= 3:
-            points += 5
-            reasons.append(f"{mal} mesin VirusTotal menandai berbahaya (+5)")
+        if mal >= lim["vt_malicious_high_count"]:
+            points += w["vt_malicious_high"]
+            reasons.append(
+                f"{mal} mesin VirusTotal menandai berbahaya (+{w['vt_malicious_high']})"
+            )
         elif mal >= 1:
-            points += 3
-            reasons.append(f"{mal} mesin VirusTotal menandai berbahaya (+3)")
+            points += w["vt_malicious_low"]
+            reasons.append(
+                f"{mal} mesin VirusTotal menandai berbahaya (+{w['vt_malicious_low']})"
+            )
         if sus >= 1:
-            points += 1
-            reasons.append(f"{sus} mesin VirusTotal menandai curiga (+1)")
+            points += w["vt_suspicious"]
+            reasons.append(
+                f"{sus} mesin VirusTotal menandai curiga (+{w['vt_suspicious']})"
+            )
     else:
         reasons.append("VirusTotal tidak tersedia, penilaian kurang akurat (+0)")
 
     if age_info.get("ok"):
         age = age_info["age_days"]
-        if age < 30:
-            points += 3
-            reasons.append(f"domain berumur {age} hari (+3)")
-        elif age < 180:
-            points += 1
-            reasons.append(f"domain berumur {age} hari (+1)")
+        if age < lim["domain_new_days"]:
+            points += w["domain_new"]
+            reasons.append(f"domain berumur {age} hari (+{w['domain_new']})")
+        elif age < lim["domain_young_days"]:
+            points += w["domain_young"]
+            reasons.append(f"domain berumur {age} hari (+{w['domain_young']})")
 
     if not ssl_info.get("ok"):
-        points += 1
-        reasons.append("SSL gagal diperiksa (+1)")
-    elif ssl_info["days_left"] < 7:
-        points += 1
-        reasons.append(f"sertifikat SSL tinggal {ssl_info['days_left']} hari (+1)")
+        points += w["ssl_failed"]
+        reasons.append(f"SSL gagal diperiksa (+{w['ssl_failed']})")
+    elif ssl_info["days_left"] < lim["ssl_expiring_days"]:
+        points += w["ssl_expiring"]
+        reasons.append(
+            f"sertifikat SSL tinggal {ssl_info['days_left']} hari (+{w['ssl_expiring']})"
+        )
 
     for f in flags:
-        points += 2
-        reasons.append(f"{f} (+2)")
+        points += w["flag"]
+        reasons.append(f"{f} (+{w['flag']})")
 
-    if points >= 5:
+    if points >= cfg.thresholds["bahaya"]:
         verdict = "BAHAYA"
-    elif points >= 2:
+    elif points >= cfg.thresholds["curiga"]:
         verdict = "CURIGA"
     else:
         verdict = "AMAN"
@@ -369,7 +377,7 @@ class InvalidURLError(ValueError):
     """URL tidak bisa diperiksa."""
 
 
-def analyze(raw_url: str) -> dict:
+def analyze(raw_url: str, config: Config | None = None) -> dict:
     """Jalankan semua pemeriksaan dan kembalikan hasilnya. Tidak mencetak apa pun."""
     url_info = parse_url(raw_url)
     if not url_info["host"]:
@@ -378,9 +386,9 @@ def analyze(raw_url: str) -> dict:
 
     ssl_info = check_ssl(url_info["host"], url_info["port"] or 443)
     age_info = check_domain_age(url_info["host"])
-    flags = check_suspicious(raw_url, url_info["host"])
+    flags = check_suspicious(raw_url, url_info["host"], config)
     vt_info = check_virustotal(full_url)
-    verdict, points, reasons = score(ssl_info, age_info, flags, vt_info)
+    verdict, points, reasons = score(ssl_info, age_info, flags, vt_info, config)
     return {
         "url": url_info,
         "ssl": ssl_info,
@@ -436,6 +444,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("url", help="URL atau domain yang diperiksa")
     parser.add_argument("--json", action="store_true", help="keluaran JSON, bukan teks")
     parser.add_argument(
+        "--config", metavar="FILE", help="file konfigurasi TOML (bawaan: config.toml paket)"
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=f"%(prog)s {metadata.version('url-checker')}",
@@ -446,8 +457,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        result = analyze(args.url)
-    except InvalidURLError as e:
+        config = load_config(args.config) if args.config else default_config()
+        result = analyze(args.url, config)
+    except (ConfigError, InvalidURLError) as e:
         print(e, file=sys.stderr)
         return EXIT_USAGE
     if args.json:

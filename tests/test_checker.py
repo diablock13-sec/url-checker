@@ -34,7 +34,7 @@ def patch_checks(
 
     monkeypatch.setattr(checker, "check_ssl", lambda host, port=443: ssl)
     monkeypatch.setattr(checker, "check_domain_age", lambda host: age)
-    monkeypatch.setattr(checker, "check_suspicious", lambda raw, host: list(flags))
+    monkeypatch.setattr(checker, "check_suspicious", lambda raw, host, config=None: list(flags))
     monkeypatch.setattr(checker, "check_virustotal", fake_vt)
 
 

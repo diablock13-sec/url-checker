@@ -1,0 +1,40 @@
+# Konfigurasi url-checker: bobot skor, ambang, batas, dan daftar merek.
+# Pakai file lain dengan: url-checker --config file.toml <url>
+# File harus lengkap. Untuk mengubah, salin file ini lalu edit salinannya.
+
+[thresholds]
+# Skor total yang menentukan hasil: mulai angka bahaya jadi BAHAYA, mulai angka curiga jadi CURIGA.
+curiga = 2
+bahaya = 5
+
+[weights]
+# Poin yang ditambahkan untuk tiap sinyal.
+vt_malicious_high = 5
+vt_malicious_low = 3
+vt_suspicious = 1
+domain_new = 3
+domain_young = 1
+ssl_failed = 1
+ssl_expiring = 1
+flag = 2
+
+[limits]
+# Batas yang memicu sinyal di atas.
+vt_malicious_high_count = 3
+domain_new_days = 30
+domain_young_days = 180
+ssl_expiring_days = 7
+many_subdomains = 3
+many_hyphens = 3
+brand_similarity = 0.85
+
+[brands]
+# Nama merek (huruf kecil) dan domain resminya. Domain lain yang memuat atau mirip nama ini diberi tanda.
+paypal = ["paypal.com"]
+google = ["google.com", "google.co.id"]
+facebook = ["facebook.com"]
+microsoft = ["microsoft.com"]
+apple = ["apple.com"]
+amazon = ["amazon.com"]
+tokopedia = ["tokopedia.com"]
+shopee = ["shopee.co.id", "shopee.com"]
