@@ -2,10 +2,26 @@ import socket
 import ssl
 import sys
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from urllib.parse import urlparse
 
 import tldextract
 import whois
+
+# merek -> domain resmi miliknya
+BRANDS = {
+    "paypal": {"paypal.com"},
+    "google": {"google.com", "google.co.id"},
+    "facebook": {"facebook.com"},
+    "microsoft": {"microsoft.com"},
+    "apple": {"apple.com"},
+    "amazon": {"amazon.com"},
+    "tokopedia": {"tokopedia.com"},
+    "shopee": {"shopee.co.id", "shopee.com"},
+}
+
+# angka yang sering dipakai menyamar jadi huruf
+LOOKALIKE = str.maketrans({"0": "o", "1": "l", "3": "e", "4": "a", "5": "s"})
 
 
 def parse_url(url: str) -> dict:
@@ -21,6 +37,11 @@ def parse_url(url: str) -> dict:
     }
 
 
+def short_error(e: Exception) -> str:
+    text = str(e).strip()
+    return text.splitlines()[0] if text else type(e).__name__
+
+
 def check_ssl(host: str, port: int = 443) -> dict:
     ctx = ssl.create_default_context()
     try:
@@ -28,7 +49,7 @@ def check_ssl(host: str, port: int = 443) -> dict:
             with ctx.wrap_socket(sock, server_hostname=host) as s:
                 cert = s.getpeercert()
     except (ssl.SSLError, OSError) as e:
-        return {"ok": False, "error": str(e)}
+        return {"ok": False, "error": short_error(e)}
 
     expires = datetime.fromtimestamp(
         ssl.cert_time_to_seconds(cert["notAfter"]), tz=timezone.utc
@@ -52,7 +73,10 @@ def check_domain_age(host: str) -> dict:
     try:
         data = whois.whois(domain)
     except Exception as e:
-        return {"ok": False, "error": str(e)}
+        msg = short_error(e)
+        if "No match" in msg:
+            msg = "domain tidak terdaftar"
+        return {"ok": False, "error": msg}
 
     created = data.creation_date
     if isinstance(created, list):
@@ -74,6 +98,38 @@ def check_domain_age(host: str) -> dict:
     return result
 
 
+def check_suspicious(raw_url: str, host: str) -> list[str]:
+    flags = []
+
+    # 1. '@' dicek di teks asli, karena urlparse membuangnya dari host
+    if "@" in raw_url.split("?")[0]:
+        flags.append("ada '@' di URL, tujuan sebenarnya bisa berbeda")
+
+    ext = tldextract.extract(host)
+
+    # 2. terlalu banyak subdomain
+    subs = [s for s in ext.subdomain.split(".") if s]
+    if len(subs) >= 3:
+        flags.append(f"subdomain terlalu banyak ({len(subs)})")
+
+    # 3. tanda '-' berlebihan
+    if host.count("-") >= 3:
+        flags.append(f"tanda '-' berlebihan ({host.count('-')})")
+
+    # 4. mirip atau memuat nama merek
+    registered = f"{ext.domain}.{ext.suffix}"
+    label = ext.domain.translate(LOOKALIKE)
+    for brand, real_domains in BRANDS.items():
+        if registered in real_domains:
+            continue
+        if brand in label:
+            flags.append(f"memuat nama merek '{brand}' tapi bukan domain resminya")
+        elif SequenceMatcher(None, label, brand).ratio() >= 0.85:
+            flags.append(f"mirip nama merek '{brand}'")
+
+    return flags
+
+
 def print_section(data: dict) -> None:
     for kunci, nilai in data.items():
         print(f"{kunci:9} : {nilai}")
@@ -84,7 +140,8 @@ def main() -> None:
         print("Pemakaian: uv run checker.py <url>")
         sys.exit(1)
 
-    hasil = parse_url(sys.argv[1])
+    raw_url = sys.argv[1]
+    hasil = parse_url(raw_url)
     print_section(hasil)
 
     if not hasil["host"]:
@@ -96,6 +153,14 @@ def main() -> None:
 
     print("\n[UMUR DOMAIN]")
     print_section(check_domain_age(hasil["host"]))
+
+    print("\n[TANDA MENCURIGAKAN]")
+    flags = check_suspicious(raw_url, hasil["host"])
+    if flags:
+        for f in flags:
+            print(f"- {f}")
+    else:
+        print("tidak ada tanda mencurigakan")
 
 
 if __name__ == "__main__":
