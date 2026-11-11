@@ -1,4 +1,6 @@
+import argparse
 import base64
+import json
 import os
 import socket
 import ssl
@@ -6,6 +8,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
+from importlib import metadata
 from urllib.parse import urlparse
 
 import requests
@@ -234,52 +237,105 @@ def score(
     return verdict, points, reasons
 
 
+NOTE = "AMAN bukan jaminan, ini hanya sinyal sederhana"
+
+# Kode keluar. Argparse bawaan memakai 2 untuk salah pakai, bentrok dengan BAHAYA,
+# jadi salah pakai dan URL tidak valid memakai 64 (EX_USAGE).
+EXIT_CODES = {"AMAN": 0, "CURIGA": 1, "BAHAYA": 2}
+EXIT_USAGE = 64
+
+
+class InvalidURLError(ValueError):
+    """URL tidak bisa diperiksa."""
+
+
+def analyze(raw_url: str) -> dict:
+    """Jalankan semua pemeriksaan dan kembalikan hasilnya. Tidak mencetak apa pun."""
+    url_info = parse_url(raw_url)
+    if not url_info["host"]:
+        raise InvalidURLError("URL tidak valid: host kosong")
+    full_url = raw_url if "://" in raw_url else "https://" + raw_url
+
+    ssl_info = check_ssl(url_info["host"], url_info["port"] or 443)
+    age_info = check_domain_age(url_info["host"])
+    flags = check_suspicious(raw_url, url_info["host"])
+    vt_info = check_virustotal(full_url)
+    verdict, points, reasons = score(ssl_info, age_info, flags, vt_info)
+    return {
+        "url": url_info,
+        "ssl": ssl_info,
+        "domain_age": age_info,
+        "flags": flags,
+        "virustotal": vt_info,
+        "verdict": verdict,
+        "score": points,
+        "reasons": reasons,
+        "note": NOTE,
+    }
+
+
 def print_section(data: dict) -> None:
     for kunci, nilai in data.items():
         print(f"{kunci:10} : {nilai}")
 
 
-def main() -> None:
-    if len(sys.argv) != 2:
-        print("Pemakaian: url-checker <url>")
-        sys.exit(1)
-
-    raw_url = sys.argv[1]
-    full_url = raw_url if "://" in raw_url else "https://" + raw_url
-    hasil = parse_url(raw_url)
-    print_section(hasil)
-
-    if not hasil["host"]:
-        print("URL tidak valid: host kosong")
-        sys.exit(1)
-
+def render_text(result: dict) -> None:
+    print_section(result["url"])
     print("\n[SSL]")
-    ssl_info = check_ssl(hasil["host"], hasil["port"] or 443)
-    print_section(ssl_info)
-
+    print_section(result["ssl"])
     print("\n[UMUR DOMAIN]")
-    age_info = check_domain_age(hasil["host"])
-    print_section(age_info)
-
+    print_section(result["domain_age"])
     print("\n[TANDA MENCURIGAKAN]")
-    flags = check_suspicious(raw_url, hasil["host"])
-    if flags:
-        for f in flags:
+    if result["flags"]:
+        for f in result["flags"]:
             print(f"- {f}")
     else:
         print("tidak ada tanda mencurigakan")
-
     print("\n[VIRUSTOTAL]")
-    vt_info = check_virustotal(full_url)
-    print_section(vt_info)
-
-    verdict, points, reasons = score(ssl_info, age_info, flags, vt_info)
+    print_section(result["virustotal"])
     print("\n[PENILAIAN]")
-    print(f"hasil      : {verdict} (skor {points})")
-    for r in reasons:
+    print(f"hasil      : {result['verdict']} (skor {result['score']})")
+    for r in result["reasons"]:
         print(f"- {r}")
-    print("catatan    : AMAN bukan jaminan, ini hanya sinyal sederhana")
+    print(f"catatan    : {result['note']}")
+
+
+class _Parser(argparse.ArgumentParser):
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        print(f"{self.prog}: error: {message}", file=sys.stderr)
+        sys.exit(EXIT_USAGE)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = _Parser(
+        prog="url-checker",
+        description="Periksa sinyal keamanan sebuah URL.",
+        epilog="Kode keluar: 0 AMAN, 1 CURIGA, 2 BAHAYA, 64 salah pakai atau URL tidak valid.",
+    )
+    parser.add_argument("url", help="URL atau domain yang diperiksa")
+    parser.add_argument("--json", action="store_true", help="keluaran JSON, bukan teks")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {metadata.version('url-checker')}",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        result = analyze(args.url)
+    except InvalidURLError as e:
+        print(e, file=sys.stderr)
+        return EXIT_USAGE
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    else:
+        render_text(result)
+    return EXIT_CODES[result["verdict"]]
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
