@@ -6,7 +6,7 @@ readme = "README.md"
 authors = [
     { name = "diablock13-sec", email = "diablock13@gmail.com" }
 ]
-requires-python = ">=3.14"
+requires-python = ">=3.11"
 dependencies = [
     "python-dotenv>=1.2.4",
     "python-whois>=0.9.6",
