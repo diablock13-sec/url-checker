@@ -6,7 +6,7 @@ import socket
 import ssl
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from difflib import SequenceMatcher
 from importlib import metadata
 from urllib.parse import urlparse
@@ -57,16 +57,18 @@ def short_error(e: Exception) -> str:
 def check_ssl(host: str, port: int = 443) -> dict:
     ctx = ssl.create_default_context()
     try:
-        with socket.create_connection((host, port), timeout=5) as sock:
-            with ctx.wrap_socket(sock, server_hostname=host) as s:
-                cert = s.getpeercert()
+        with (
+            socket.create_connection((host, port), timeout=5) as sock,
+            ctx.wrap_socket(sock, server_hostname=host) as s,
+        ):
+            cert = s.getpeercert()
     except (ssl.SSLError, OSError) as e:
         return {"ok": False, "error": short_error(e)}
 
     expires = datetime.fromtimestamp(
-        ssl.cert_time_to_seconds(cert["notAfter"]), tz=timezone.utc
+        ssl.cert_time_to_seconds(cert["notAfter"]), tz=UTC
     )
-    days_left = (expires - datetime.now(timezone.utc)).days
+    days_left = (expires - datetime.now(UTC)).days
     issuer = dict(item[0] for item in cert["issuer"])
     return {
         "ok": True,
@@ -84,7 +86,7 @@ def check_domain_age(host: str) -> dict:
 
     try:
         data = whois.whois(domain)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 (python-whois melempar banyak jenis error)
         msg = short_error(e)
         if "No match" in msg:
             msg = "domain tidak terdaftar"
@@ -96,9 +98,9 @@ def check_domain_age(host: str) -> dict:
     if not isinstance(created, datetime):
         return {"ok": False, "error": "tanggal pembuatan tidak ada di WHOIS"}
     if created.tzinfo is None:
-        created = created.replace(tzinfo=timezone.utc)
+        created = created.replace(tzinfo=UTC)
 
-    age_days = (datetime.now(timezone.utc) - created).days
+    age_days = (datetime.now(UTC) - created).days
     result = {
         "ok": True,
         "domain": domain,
