@@ -18,11 +18,11 @@ from urllib.parse import urlparse
 import requests
 import tldextract
 import whois
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 
 from url_checker.config import Config, ConfigError, default_config, load_config
 
-load_dotenv()
+load_dotenv(find_dotenv(usecwd=True))
 
 VT_BASE = "https://www.virustotal.com/api/v3"
 RATE_LIMIT_WAIT_DEFAULT = 15.0  # detik, kalau Retry-After tidak ada atau tidak terbaca
