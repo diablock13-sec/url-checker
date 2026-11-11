@@ -1,12 +1,21 @@
+import base64
+import os
 import socket
 import ssl
 import sys
+import time
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from urllib.parse import urlparse
 
+import requests
 import tldextract
 import whois
+from dotenv import load_dotenv
+
+load_dotenv()
+
+VT_BASE = "https://www.virustotal.com/api/v3"
 
 # merek -> domain resmi miliknya
 BRANDS = {
@@ -130,9 +139,54 @@ def check_suspicious(raw_url: str, host: str) -> list[str]:
     return flags
 
 
+def vt_stats(stats: dict) -> dict:
+    return {
+        "ok": True,
+        "malicious": stats.get("malicious", 0),
+        "suspicious": stats.get("suspicious", 0),
+        "harmless": stats.get("harmless", 0),
+        "undetected": stats.get("undetected", 0),
+    }
+
+
+def check_virustotal(url: str) -> dict:
+    key = os.getenv("VT_API_KEY")
+    if not key:
+        return {"ok": False, "error": "VT_API_KEY belum diatur di .env"}
+
+    headers = {"x-apikey": key}
+    url_id = base64.urlsafe_b64encode(url.encode()).decode().strip("=")
+
+    try:
+        r = requests.get(f"{VT_BASE}/urls/{url_id}", headers=headers, timeout=15)
+
+        if r.status_code == 404:
+            # belum pernah discan: kirim, lalu tunggu hasilnya
+            r = requests.post(
+                f"{VT_BASE}/urls", headers=headers, data={"url": url}, timeout=15
+            )
+            r.raise_for_status()
+            analysis_id = r.json()["data"]["id"]
+            for _ in range(4):
+                time.sleep(5)  # jeda, juga menjaga batas 4 request/menit
+                a = requests.get(
+                    f"{VT_BASE}/analyses/{analysis_id}", headers=headers, timeout=15
+                )
+                a.raise_for_status()
+                attrs = a.json()["data"]["attributes"]
+                if attrs["status"] == "completed":
+                    return vt_stats(attrs["stats"])
+            return {"ok": False, "error": "analisis belum selesai, coba lagi nanti"}
+
+        r.raise_for_status()
+        return vt_stats(r.json()["data"]["attributes"]["last_analysis_stats"])
+    except requests.RequestException as e:
+        return {"ok": False, "error": short_error(e)}
+
+
 def print_section(data: dict) -> None:
     for kunci, nilai in data.items():
-        print(f"{kunci:9} : {nilai}")
+        print(f"{kunci:10} : {nilai}")
 
 
 def main() -> None:
@@ -141,6 +195,7 @@ def main() -> None:
         sys.exit(1)
 
     raw_url = sys.argv[1]
+    full_url = raw_url if "://" in raw_url else "https://" + raw_url
     hasil = parse_url(raw_url)
     print_section(hasil)
 
@@ -161,6 +216,9 @@ def main() -> None:
             print(f"- {f}")
     else:
         print("tidak ada tanda mencurigakan")
+
+    print("\n[VIRUSTOTAL]")
+    print_section(check_virustotal(full_url))
 
 
 if __name__ == "__main__":
