@@ -184,6 +184,56 @@ def check_virustotal(url: str) -> dict:
         return {"ok": False, "error": short_error(e)}
 
 
+def score(
+    ssl_info: dict, age_info: dict, flags: list[str], vt_info: dict
+) -> tuple[str, int, list[str]]:
+    points = 0
+    reasons = []
+
+    if vt_info.get("ok"):
+        mal = vt_info["malicious"]
+        sus = vt_info["suspicious"]
+        if mal >= 3:
+            points += 5
+            reasons.append(f"{mal} mesin VirusTotal menandai berbahaya (+5)")
+        elif mal >= 1:
+            points += 3
+            reasons.append(f"{mal} mesin VirusTotal menandai berbahaya (+3)")
+        if sus >= 1:
+            points += 1
+            reasons.append(f"{sus} mesin VirusTotal menandai curiga (+1)")
+    else:
+        reasons.append("VirusTotal tidak tersedia, penilaian kurang akurat (+0)")
+
+    if age_info.get("ok"):
+        age = age_info["age_days"]
+        if age < 30:
+            points += 3
+            reasons.append(f"domain berumur {age} hari (+3)")
+        elif age < 180:
+            points += 1
+            reasons.append(f"domain berumur {age} hari (+1)")
+
+    if not ssl_info.get("ok"):
+        points += 1
+        reasons.append("SSL gagal diperiksa (+1)")
+    elif ssl_info["days_left"] < 7:
+        points += 1
+        reasons.append(f"sertifikat SSL tinggal {ssl_info['days_left']} hari (+1)")
+
+    for f in flags:
+        points += 2
+        reasons.append(f"{f} (+2)")
+
+    if points >= 5:
+        verdict = "BAHAYA"
+    elif points >= 2:
+        verdict = "CURIGA"
+    else:
+        verdict = "AMAN"
+    return verdict, points, reasons
+
+
 def print_section(data: dict) -> None:
     for kunci, nilai in data.items():
         print(f"{kunci:10} : {nilai}")
@@ -204,10 +254,12 @@ def main() -> None:
         sys.exit(1)
 
     print("\n[SSL]")
-    print_section(check_ssl(hasil["host"], hasil["port"] or 443))
+    ssl_info = check_ssl(hasil["host"], hasil["port"] or 443)
+    print_section(ssl_info)
 
     print("\n[UMUR DOMAIN]")
-    print_section(check_domain_age(hasil["host"]))
+    age_info = check_domain_age(hasil["host"])
+    print_section(age_info)
 
     print("\n[TANDA MENCURIGAKAN]")
     flags = check_suspicious(raw_url, hasil["host"])
@@ -218,7 +270,15 @@ def main() -> None:
         print("tidak ada tanda mencurigakan")
 
     print("\n[VIRUSTOTAL]")
-    print_section(check_virustotal(full_url))
+    vt_info = check_virustotal(full_url)
+    print_section(vt_info)
+
+    verdict, points, reasons = score(ssl_info, age_info, flags, vt_info)
+    print("\n[PENILAIAN]")
+    print(f"hasil      : {verdict} (skor {points})")
+    for r in reasons:
+        print(f"- {r}")
+    print("catatan    : AMAN bukan jaminan, ini hanya sinyal sederhana")
 
 
 if __name__ == "__main__":
