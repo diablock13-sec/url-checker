@@ -1,0 +1,21 @@
+[project]
+name = "url-cheker"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "diablock13-sec", email = "diablock13@gmail.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "python-whois>=0.9.6",
+    "requests>=2.34.2",
+    "tldextract>=5.4.0",
+]
+
+[project.scripts]
+url-cheker = "url_cheker:main"
+
+[build-system]
+requires = ["uv_build>=0.13.7,<0.14.0"]
+build-backend = "uv_build"
